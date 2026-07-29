@@ -53,11 +53,12 @@ def load_stt():
             from transformers import pipeline
 
             device, _ = resolve_device()
+            # transformers 5.x renamed torch_dtype -> dtype.
             _stt_pipeline = pipeline(
                 "automatic-speech-recognition",
                 model=config.STT_MODEL,
                 device=device,
-                torch_dtype=torch.float32,
+                dtype=torch.float32,
             )
         return _stt_pipeline
 
@@ -83,7 +84,12 @@ class LlmResult:
 
 
 def load_llm():
-    """Configure google-generativeai with the API key (cached)."""
+    """Build a Gemini caller (cached).
+
+    Prefers the current ``google-genai`` SDK and falls back to the retired
+    ``google-generativeai`` package the notebook used, so either install works.
+    Returns a ``(prompt) -> response`` callable.
+    """
     global _llm_client
     with _lock:
         if _llm_client is None:
@@ -93,10 +99,19 @@ def load_llm():
                     "GOOGLE_API_KEY not found. Put it in .streamlit/secrets.toml "
                     "or set it as an environment variable."
                 )
-            import google.generativeai as genai
+            try:
+                from google import genai  # google-genai (current)
 
-            genai.configure(api_key=api_key)
-            _llm_client = genai.GenerativeModel(config.LLM_MODEL)
+                client = genai.Client(api_key=api_key)
+                _llm_client = lambda prompt: client.models.generate_content(
+                    model=config.LLM_MODEL, contents=prompt
+                )
+            except ImportError:
+                import google.generativeai as legacy_genai  # deprecated fallback
+
+                legacy_genai.configure(api_key=api_key)
+                model = legacy_genai.GenerativeModel(config.LLM_MODEL)
+                _llm_client = model.generate_content
         return _llm_client
 
 
@@ -105,8 +120,8 @@ def generate_reply(user_text: str) -> LlmResult:
     if not user_text.strip():
         return LlmResult(text="", ok=False, error="Nothing was transcribed.")
     try:
-        model = load_llm()
-        response = model.generate_content(build_prompt(user_text))
+        call = load_llm()
+        response = call(build_prompt(user_text))
         reply = (getattr(response, "text", "") or "").strip()
         if not reply:
             return LlmResult(text="", ok=False, error="The model returned an empty reply.")
