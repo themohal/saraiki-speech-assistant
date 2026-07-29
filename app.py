@@ -76,6 +76,15 @@ with st.sidebar:
         f"STT `{config.STT_MODEL}`  \nLLM `{config.LLM_MODEL}`  \nTTS `{config.TTS_MODEL}`"
     )
     speak_replies = st.toggle("Speak replies", value=True)
+    low_memory = st.toggle(
+        "Low-memory mode",
+        value=False,
+        help=(
+            "Unload the TTS model after every reply. Slower (it reloads each "
+            "time) but avoids running out of RAM on small hosts such as "
+            "Streamlit Cloud."
+        ),
+    )
     st.divider()
     if st.button("Clear conversation", use_container_width=True):
         st.session_state.turns = []

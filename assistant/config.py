@@ -6,7 +6,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Models, matching the notebook.
 STT_MODEL = os.getenv("SARAIKI_STT_MODEL", "themohal/saraiki-whisper-small")
-TTS_MODEL = os.getenv("SARAIKI_TTS_MODEL", "k2-fsa/OmniVoice")
+# bf16 community mirror of k2-fsa/OmniVoice: identical file layout and
+# architecture, but 2.0 GB instead of 3.3 GB - it fits Streamlit Cloud's disk
+# and memory budget. Set SARAIKI_TTS_MODEL=k2-fsa/OmniVoice for the original.
+TTS_MODEL = os.getenv("SARAIKI_TTS_MODEL", "drbaph/OmniVoice-bf16")
 LLM_MODEL = os.getenv("SARAIKI_LLM_MODEL", "gemini-2.5-flash")
 
 # OmniVoice speaks Saraiki by cloning the timbre of this reference clip.

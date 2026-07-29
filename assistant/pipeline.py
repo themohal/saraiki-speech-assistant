@@ -26,18 +26,24 @@ _llm_client = None
 def resolve_device() -> tuple[str, "object"]:
     """Pick the best available device.
 
-    The notebook hardcodes ``cuda:0`` + float16; that crashes on a CPU-only
-    box, so fall back to CPU + float32 when no GPU is present.
+    The notebook hardcodes ``cuda:0`` + float16, which crashes on a CPU-only
+    host (CPU float16 is largely unimplemented in torch). On CPU we use
+    bfloat16 instead: it keeps the weights at half size, which is what makes
+    OmniVoice fit in Streamlit Cloud's ~2.7 GB memory budget.
     """
     import torch
 
     if torch.cuda.is_available():
         return "cuda:0", torch.float16
-    return "cpu", torch.float32
+    return "cpu", torch.bfloat16
 
 
 def device_label() -> str:
-    device, dtype = resolve_device()
+    """Human-readable device string for the sidebar."""
+    try:
+        device, dtype = resolve_device()
+    except ImportError:
+        return "torch not installed"
     return f"{device} ({str(dtype).replace('torch.', '')})"
 
 
@@ -53,7 +59,9 @@ def load_stt():
             from transformers import pipeline
 
             device, _ = resolve_device()
-            # transformers 5.x renamed torch_dtype -> dtype.
+            # Whisper-small stays in float32 (~1 GB) - it is the accuracy-
+            # critical stage and small enough not to matter. transformers 5.x
+            # renamed torch_dtype -> dtype.
             _stt_pipeline = pipeline(
                 "automatic-speech-recognition",
                 model=config.STT_MODEL,
@@ -61,6 +69,29 @@ def load_stt():
                 dtype=torch.float32,
             )
         return _stt_pipeline
+
+
+def unload_tts() -> None:
+    """Drop OmniVoice from memory.
+
+    Streamlit Cloud gives ~2.7 GB; Whisper plus OmniVoice sitting resident at
+    once is what pushes the app over and gets it killed mid-request.
+    """
+    global _tts_model
+    with _lock:
+        if _tts_model is None:
+            return
+        _tts_model = None
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def transcribe(audio_bytes: bytes) -> str:
@@ -161,11 +192,18 @@ def synthesize(text: str) -> np.ndarray:
             f"Reference audio not found at {config.REF_AUDIO}. OmniVoice needs it "
             "to clone a Saraiki voice."
         )
+    import torch
+
     model = load_tts()
-    audio = model.generate(
-        text=text,
-        language="saraiki",
-        ref_audio=str(config.REF_AUDIO),
-    )
-    waveform = np.asarray(audio[0], dtype=np.float32).squeeze()
-    return waveform
+    with torch.inference_mode():
+        audio = model.generate(
+            text=text,
+            language="saraiki",
+            ref_audio=str(config.REF_AUDIO),
+        )
+
+    clip = audio[0]
+    if isinstance(clip, torch.Tensor):
+        # numpy has no bfloat16, so cast to float32 while still a tensor.
+        clip = clip.detach().to(torch.float32).cpu().numpy()
+    return np.asarray(clip, dtype=np.float32).squeeze()
