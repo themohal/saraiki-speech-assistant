@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    background: transparent;
+  }
+  #ptt {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+    user-select: none;
+    cursor: pointer;
+    width: 100%;
+    max-width: 460px;
+    padding: 20px 24px;
+    border: none;
+    border-radius: 999px;
+    font-size: 1.06rem;
+    font-weight: 650;
+    letter-spacing: .2px;
+    color: #fff;
+    background: linear-gradient(135deg, #2f7d5d 0%, #1f5f46 100%);
+    box-shadow: 0 6px 18px rgba(31, 95, 70, .32);
+    transition: transform .12s ease, box-shadow .12s ease, background .2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+  }
+  #ptt:hover:not(.recording):not(:disabled) { transform: translateY(-1px); }
+  #ptt.recording {
+    background: linear-gradient(135deg, #c9403f 0%, #97282a 100%);
+    box-shadow: 0 0 0 8px rgba(201, 64, 63, .16), 0 6px 20px rgba(151, 40, 42, .38);
+    transform: scale(.99);
+  }
+  #ptt:disabled { opacity: .55; cursor: not-allowed; }
+  .dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: rgba(255,255,255,.9); flex: none;
+  }
+  #ptt.recording .dot { animation: pulse 1s infinite ease-in-out; }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.72); } }
+  #meter {
+    width: 100%; max-width: 460px; height: 5px; border-radius: 999px;
+    background: rgba(127,127,127,.22); overflow: hidden;
+  }
+  #level { height: 100%; width: 0%; background: #c9403f; transition: width .07s linear; }
+  #hint { font-size: .78rem; opacity: .65; min-height: 1.1em; text-align: center; }
+  #hint.error { color: #c9403f; opacity: 1; font-weight: 600; }
+</style>
+</head>
+<body>
+  <button id="ptt" type="button"><span class="dot"></span><span id="label">Hold to speak</span></button>
+  <div id="meter"><div id="level"></div></div>
+  <div id="hint">Press and hold, speak, then release</div>
+
+<script>
+// ---- Streamlit component protocol (implemented directly, no npm build) ----
+function send(msg) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), "*");
+}
+function setFrameHeight() {
+  send({ type: "streamlit:setFrameHeight", height: document.body.scrollHeight + 8 });
+}
+function setComponentValue(value) {
+  send({ type: "streamlit:setComponentValue", value: value, dataType: "json" });
+}
+
+const btn = document.getElementById("ptt");
+const label = document.getElementById("label");
+const hint = document.getElementById("hint");
+const level = document.getElementById("level");
+
+let recorder = null, chunks = [], stream = null;
+let recording = false, counter = 0, startedAt = 0;
+let audioCtx = null, analyser = null, rafId = null, minMs = 350;
+
+function say(text, isError) {
+  hint.textContent = text;
+  hint.classList.toggle("error", !!isError);
+  setFrameHeight();
+}
+
+function pickMime() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+  for (const m of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return "";
+}
+
+function drawLevel() {
+  if (!analyser) return;
+  const buf = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(buf);
+  let peak = 0;
+  for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128));
+  level.style.width = Math.min(100, (peak / 128) * 260) + "%";
+  rafId = requestAnimationFrame(drawLevel);
+}
+
+async function startRecording() {
+  if (recording) return;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+  } catch (err) {
+    say("Microphone blocked. Allow mic access in your browser, then retry.", true);
+    return;
+  }
+  const mime = pickMime();
+  try {
+    recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  } catch (err) {
+    say("MediaRecorder is unavailable in this browser.", true);
+    stream.getTracks().forEach((t) => t.stop());
+    return;
+  }
+
+  chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = handleStop;
+  recorder.start();
+  recording = true;
+  startedAt = Date.now();
+
+  btn.classList.add("recording");
+  label.textContent = "Recording... release to send";
+  say("Listening");
+
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    drawLevel();
+  } catch (e) { /* level meter is cosmetic */ }
+}
+
+function stopRecording() {
+  if (!recording) return;
+  const held = Date.now() - startedAt;
+  // Guard against an accidental tap producing an empty clip.
+  const finish = () => { try { recorder.stop(); } catch (e) {} };
+  if (held < minMs) { setTimeout(finish, minMs - held); } else { finish(); }
+
+  recording = false;
+  btn.classList.remove("recording");
+  label.textContent = "Hold to speak";
+  say("Processing...");
+  if (rafId) cancelAnimationFrame(rafId);
+  level.style.width = "0%";
+}
+
+function handleStop() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; analyser = null; }
+
+  const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+  if (!blob.size) { say("Nothing was recorded, try again.", true); return; }
+
+  const reader = new FileReader();
+  reader.onloadend = () => {
+    counter += 1;
+    setComponentValue({
+      id: counter,
+      audio_base64: String(reader.result).split(",")[1] || "",
+      mime: blob.type,
+      size: blob.size,
+    });
+    say("Sent - generating reply");
+  };
+  reader.readAsDataURL(blob);
+}
+
+// Pointer events cover mouse, touch and pen with one code path.
+btn.addEventListener("pointerdown", (e) => { e.preventDefault(); startRecording(); });
+btn.addEventListener("pointerup", (e) => { e.preventDefault(); stopRecording(); });
+btn.addEventListener("pointercancel", stopRecording);
+btn.addEventListener("pointerleave", () => { if (recording) stopRecording(); });
+btn.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// Hold the spacebar as a keyboard alternative.
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !e.repeat) { e.preventDefault(); startRecording(); }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") { e.preventDefault(); stopRecording(); }
+});
+
+// Streamlit sends render events; we only need it to know we are alive.
+window.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "streamlit:render") setFrameHeight();
+});
+
+send({ type: "streamlit:componentReady", apiVersion: 1 });
+setFrameHeight();
+</script>
+</body>
+</html>
