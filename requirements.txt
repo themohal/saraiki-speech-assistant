@@ -1,5 +1,12 @@
-# Pin Streamlit Cloud to Python 3.12 (App settings -> Python version).
-# On 3.14 there are no numba/torch wheels and the install fails.
+# Streamlit Cloud: set the Python version to 3.12 (see runtime.txt).
+#
+# numpy is capped below 2.5 on purpose. omnivoice pulls in librosa -> numba,
+# and numba 0.66 requires numpy<2.5. Without this cap the resolver walks numba
+# backwards to 0.53.1, whose llvmlite==0.36.0 has no wheels and refuses to
+# build on any Python above 3.9 -- that is the "Cannot install on Python
+# version 3.12" build failure.
+numpy>=1.26,<2.5
+
 streamlit>=1.40
 google-genai>=1.0
 transformers>=5.3.0
@@ -7,11 +14,4 @@ torch>=2.4
 torchaudio>=2.4
 omnivoice>=0.2.1
 soundfile>=0.12.1
-numpy>=1.26
 accelerate>=0.30
-
-# librosa is deliberately NOT listed. The microphone sends 16 kHz mono WAV,
-# which soundfile reads directly. librosa is only needed to decode compressed
-# uploads (WebM/MP3/M4A) and it drags in numba/llvmlite, which cannot build on
-# newer Python versions. Install it yourself if you need those formats:
-#   pip install librosa
