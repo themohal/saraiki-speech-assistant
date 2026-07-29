@@ -38,27 +38,38 @@ def decode_to_waveform(raw: bytes, target_rate: int = STT_SAMPLE_RATE) -> np.nda
     if not raw:
         return np.zeros(0, dtype=np.float32)
 
-    # Fast path: WAV/FLAC/OGG that libsndfile understands directly.
+    # Fast path: the mic component sends 16 kHz mono WAV, which libsndfile
+    # reads directly - no ffmpeg needed. Also covers FLAC/OGG uploads.
     try:
         samples, rate = sf.read(io.BytesIO(raw), dtype="float32", always_2d=False)
         return _resample(_to_mono(samples), rate, target_rate)
-    except Exception:
-        pass
+    except Exception as sf_error:
+        first_error = sf_error
 
-    # Fallback for WebM/Opus and friends. librosa needs a real file path here.
+    # Fallback for compressed containers (WebM/Opus, MP3, M4A) that can only
+    # arrive from a file upload now. Needs ffmpeg or another audioread backend.
     tmp_path: Path | None = None
     try:
+        import warnings
+
         import librosa
 
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+        suffix = ".webm" if raw[:4] == b"\x1a\x45\xdf\xa3" else ".bin"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(raw)
             tmp_path = Path(tmp.name)
-        samples, rate = librosa.load(str(tmp_path), sr=target_rate, mono=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            samples, _ = librosa.load(str(tmp_path), sr=target_rate, mono=True)
+        if samples.size == 0:
+            raise RuntimeError("decoded to an empty waveform")
         return samples.astype(np.float32, copy=False)
     except Exception as exc:  # pragma: no cover - depends on local codecs
         raise RuntimeError(
-            "Could not decode the recorded audio. Install ffmpeg and make sure it is "
-            f"on PATH so WebM/Opus microphone input can be read. Original error: {exc}"
+            "Could not decode this audio. The microphone button sends WAV, which "
+            "always works; compressed formats such as WebM/Opus, MP3 or M4A need "
+            "ffmpeg installed and on PATH. "
+            f"(soundfile: {first_error}; librosa: {exc})"
         ) from exc
     finally:
         if tmp_path is not None:
